@@ -1,0 +1,322 @@
+---
+title: "Twitter Analysis"
+author: "Irakli Kavtaradze"
+date: "6/16/2020"
+output: html_document
+toc: true
+toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE,
+                      results = TRUE)
+```
+ანალიზისთვის საჭირო პაკეტები:
+```{r packages}
+#პაკეტებს ყოველთვის საწყის სექციაში ვათავსებ ერთად. განმეორებითი ანალიზის დროს უფრო მარტივია ყველა პაკეტის ერთად ჩატვირთვა
+library(skimr) #მონაცემების მიმოხილვისთვის
+library(rtweet) #ტვიტერის API-სთან საკომუნიკაციოდ
+library(readr) #მონაცემების ჩასატვირთად
+library(dplyr) #ტექსტის მანიპულაციისთვის
+library(tidyr) #დატაფრეიმის მანიპულაციისთვის
+library(tidytext) #სენტიმენტ ანალიზისთვის
+library(lubridate) #დროით ცვლადთან სამუშაოდ
+library(ggplot2) #ვიზუალიზაციისთვის
+library(ggrepel) #ვიზუალიზაციის დამატებითი პარამეტრების გასაკონტროლებლად
+library(stringr) #ტექსტის მანიპულაციისთვის
+library(scales) #ვიზუალიზაციებში ღერძების შესაცვლელად
+library(ggthemes) #ggplot2-ის თემები
+library(patchwork) #ggplot2-ის დამატება, ფლოთების გასაერთიანებლად
+```
+
+ტვიტერთან დასაკავშირებლად გვჭირდება API გასაები და access token.
+
+```{r twitter API, include = FALSE}
+apiKey <- "Uq3nQ3TZIvpa53HysRQRVCURo"
+apiSecretKey <- "dMm0jP4epizE5bbBGwdhkKoVx7gAiT1mQEWQ9ybnJAnQFRpejB"
+accessToken <- "1375295280-9DG7lYavkqTZ9oZZeKJaPHmCuTxYbZfLtQHijZS"
+accessTokenSecret <- "zDgjdtG6qn9JwDqTmu7xiTanQhgFDYhXCf4dOIhuJQN71"
+
+token <- create_token(
+  app = "Z.axis",
+  consumer_key = apiKey,
+  consumer_secret = apiSecretKey,
+  access_token = accessToken,
+  access_secret = accessTokenSecret)
+
+```
+##BlackLivesMatter ტვიტერის ანალიზი
+```{r Black Lives Matter}
+#Black Lives Matter-ის ჰეშთეგის მქონე ტვიტები ბრიტანეთიდან
+blmUK <- search_tweets("#BlackLivesMatter", n = 18000, geocode = lookup_coords("uk"), include_rts = FALSE)
+#მხოლოდ ინგლისური ტვიტები დავტოვოთ
+blmUK <- blmUK %>% 
+  filter(lang == "en")
+
+#BLM ტვიტები ამერიკიდან
+blmUS <- search_tweets("#BlackLivesMatter", n = 18000, geocode = lookup_coords(address = "usa"), include_rts = FALSE)
+#ინგლისური ტვიტების დატოვება
+blmUS <- blmUS %>% 
+  filter(lang == "en")
+
+#გავაერთიანოთ ამერიკისა და ბრიტანეთის მონაცემები
+blm_tweets <- rbind(blmUK %>% 
+                      mutate(source = "UK"),
+                    blmUS %>% 
+                      mutate(source = "US")) %>%
+                    mutate(time = ymd_hms(created_at))
+#დავტოვოთ მხოლოდ საჭირო ცვლადები
+blm_tweets <- blm_tweets %>% 
+  select(screen_name,time,source,text) %>% 
+  rename(tweets = text)
+
+#ბრიტანეთისა და ამერიკის ტვიტების სიხშირეების შედარება
+blm_tweets %>% 
+  ggplot(aes(x = time, fill = source)) +
+  geom_histogram(position = "identity", colour = "white", alpha = 0.8) +
+  labs(title = "#BlackLivesMatter tweet frequency in UK and US",
+       caption = "More people tweet with this hashtag in the US but Twiter API caps the number of tweets,\n so more than 18k tweets were posted in a single day in the US") +
+  theme_minimal() 
+
+#ტვიტების ვექტორის გასუფთავება
+remove_reg <- "&amp;|&lt;|&gt;"
+tidy_blm <- blm_tweets %>% 
+  mutate(tweets = str_remove_all(tweets, remove_reg)) %>%
+  unnest_tokens(word, tweets, token = "tweets") %>%
+  filter(!word %in% stop_words$word,
+         !word %in% str_remove_all(stop_words$word, "'"),
+         str_detect(word, "[a-z]"))
+
+#გამოვთვალოთ სიტყვების სიხშირეები თითოეული ქვეყნისთვის
+frequency <- tidy_blm %>% 
+  group_by(source) %>% #ვაჯგუფებთ ქვეყნის მიხედვით
+  count(word, sort = TRUE) %>% #ვითვლით თით`ეული სიტყვის სიხშირეს ქვეყნებისთვის
+  left_join(tidy_blm %>% #ვუერთებთ მეორე დატაფრეიმს
+              group_by(source) %>% #ვაჯგუფებთ ქვეყნის მიხედვით
+              summarise(total = n())) %>% #ვითვლით თითოეული ქვეყნისთვის სიტყვების რაოდენობას
+  mutate(freq = n/total) #თითოეული სიტყვის სიხშირეს ვაფარდებთ სიტყვების რაოდენობასთან - ვიგებთ რა წილი აქვს ამ სიტყვებს სიტყვების მთლიან რაოდენობაში
+frequency
+
+#ეხლა შეგვიძლია ქვეყნების შევადაროთ წერტილოვან განაწილებაზე (scatter plot)
+
+#თავიდან ვნახოთ ყველაზე ხშირად გამოყენებული სიტყვები
+frequency %>% 
+  filter(word != "#blacklivesmatter") %>% 
+  group_by(source) %>%
+  arrange(desc(freq)) %>%
+  top_n(15) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = reorder(word, freq), y = freq)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~source, scales = "free") +
+  coord_flip() +
+  theme_bw()
+
+#x და y ღერძებზე რომ გავანაწილოთ ქვეყნები, ცალ-ცალკე სვეტებში უნდა გვქონდეს
+frequency <- frequency %>% 
+  select(source, word, freq) %>% 
+  spread(source, freq) %>% #გავშალოთ ქვეყნები ცალკე სვეტებად
+  arrange(UK, US)
+
+frequency %>% 
+  filter(word != "#blacklivesmatter") %>% 
+  ggplot(aes(x = UK, y = US)) +
+  geom_jitter(alpha = 0.1, size = 2, width = 0.25, height = 0.25) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5) +
+  scale_x_log10(labels = percent_format()) + #ლოგარითმულ სკალაზე გადაყვანა
+  scale_y_log10(labels = percent_format()) +
+  geom_abline(colour = "red") +
+  labs(title = "How UK and US population use words when they tweet about #BLackLivesMatter",
+       subtitle = "Words bellow the line are used more in the UK,\nabove the line - more in US") +
+  theme_bw()
+
+
+```
+
+შევამოწმოთ BLM-ის სენტიმენტ ანალიზი და ვნახოთ ამერიკა და ბრიტანეთი რამდენად განსხვავდება ერთმანეთისგან.
+```{r BLM sentiment analysis}
+#get_sentiments("afinn")
+#get_sentiments("bing")
+#get_sentiments("nrc")
+
+#ტვიტები დავნომროთ იმისთვის, რომ შემდეგ თითოეულ ტვიტს მივანიჭოთ სენტიმენტის ქულა
+blm_tweets <- blm_tweets %>% 
+  mutate(id = as.factor(row_number()))
+
+#გადავიყვანოთ 'სუფთა' ფორმატში: თითო მწკრივში - თითო სიტყვა
+blm_tweets <- blm_tweets %>% 
+  unnest_tokens(word, tweets, token = "tweets")
+
+#მონაცემები გავაერთიანოთ ლექსიკონთან. nrc სიტყვებს შესაბამის ემოციებს უსადაგებს
+blm_nrc <- blm_tweets %>% 
+  inner_join(get_sentiments("nrc")) #ლექსიკონის მიბმა
+
+#ვნახოთ სენტიმენტებში რა განსხვავებაა ამერიკასა და ბრიტანეთს შორის  
+blm_nrc %>% 
+  group_by(source) %>% 
+  count(sentiment) %>% 
+  ggplot(aes(x = reorder(sentiment, -n), y = n, fill = source)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Emotions of BLM tweets in US and UK",
+       x = "Sentiment", y = "Frequency",
+       fill = "Country") +
+  theme_fivethirtyeight()
+
+```
+
+ეხლა შევამოწმოთ დღის განმავლობაში როგორ იცვლება სენტიმენტი ამერიკასა და ბრიტანეთში. ამისთვის, მონაცემებს მივაბათ AFINN ლექსიკონი, რომელიც პოზიტიური-ნეგატიური დიქოტომიის ნაცვლად +- ქულებს ანიჭებს სიტყვებს. 
+```{r BLM time-series}
+blm_afinn <- subset(blm_tweets, time > "2020-06-17") #მხოლოდ ერთი დღის ტვიტები ავარჩიოთ
+blm_afinn <- blm_afinn %>% 
+  filter(!time < "2020-06-18")
+
+#მივაბათ afinn-ის ლექსიკონი
+blm_afinn <- blm_afinn %>% 
+  inner_join(get_sentiments("afinn"))
+
+#დავაჯგუფოთ ქვეყნის და დროის მიხედვით და ვნახოთ ყოველ 5 წუთში რამდენია სენტიმენტის ქულა ორივე ქვეყნისთვის
+
+blm_afinn$minutes <- cut(blm_afinn$time, breaks = "60 min") #cut ფუნქცია დროის ცვლადს სასურველ პერიოდებად ყოფს
+
+#შევამოწმოთ სენტიმენტის ქულების განაწილება  
+hist(blm_afinn$value)
+
+#smooth line-ით შემოწმება როგორ იცვლება სენტიმენტები ერთ დღის განმავლობაში
+blm_afinn %>% 
+  ggplot(aes(x = time, y = value, colour = source)) +
+  stat_smooth(type = "line",  span = 0.7, se = FALSE) +
+  theme_few()
+
+
+#წერტილოვანი განაწილებით ვნახოთ დეტალები
+blm_afinn %>%   
+  ggplot(aes(x = time, y = value)) +
+  geom_jitter(aes(colour = source), width = 0.1, alpha = 0.08) +
+  geom_hline(yintercept = -0.159739, colour = "orange") +
+    geom_hline(yintercept = -0.1826805, colour = "gray") +
+  coord_flip() +
+  facet_wrap(~source, scales = "free") +
+  theme_few()
+
+```
+
+##კოვიდის გავრცელება და ტვიტერის რეაქცია
+
+ბრიტანეთის მთავრობის [საიტზე](https://coronavirus.data.gov.uk/#category=regions&map=rate) მოცემულია კოვიდის გავრცელების სტატისტიკა ადმინისტრაციული ერთეულების მიხედვით. მე აღებული მაქვს ინგლისის რეგიონები - 8 რეგიონი ჯამში და ტვიტერიდან ჩამოვტვირთავ თითოეული რეგიონის მთავრი ქალაქების ტვიტებს და დავუშვებ, რომ ეს ქალაქები მოცემული რეგიონის რეპრეზენტატულია. 
+
+```{r covid statistics in the UK, results = TRUE}
+CovidUK <- read_csv("data/covid_cases.csv")
+skim(CovidUK)
+
+covidUK <- CovidUK %>% 
+  select(`Area name`,`Area type`,`Specimen date`,`Cumulative lab-confirmed cases rate`) #მხოლოდ საჭირო ცვლადების არჩევა
+
+covidUK <- covidUK %>% 
+  rename(name = `Area name`, type = `Area type`, s_date = `Specimen date`, case_rate = `Cumulative lab-confirmed cases rate`)
+
+#ვიზუალიზაცია ინგლისის რეგიონებში კოვიდის გავრცელების სანახავად
+covidUK %>% 
+  filter(type == "Region") %>% #შევამოწმოთ მხოლოდ რეგიონები
+  mutate(label = if_else(s_date == max(s_date), as.character(name), NA_character_)) %>% #იარლიყები (მხოლოდ ბოლო რიცხვს თუ არ ავიღებთ, ყველა დღეზე დასვამს იარლიყს, რაც არ გვინდა)
+  ggplot(aes(x = s_date, y = case_rate, colour = name)) +
+  geom_line(size = 1) +
+  geom_label_repel(aes(label = label), nudge_x = 2, na.rm = TRUE) + #nudge_x-ით იარლიყებს მარჯვნივ ვწევთ
+  guides(colour = FALSE) +
+  expand_limits(x = as_date("2020-06-30")) + #იარლიყებმა ხაზები რომ არ გადაფაროს, x ღერძს ვაგრძელებ მეტი სივრცისთვის
+  theme_classic()
+
+```
+
+ტვიტერიდან ჩამოვტვირთავთ #covid19 ჰეშთეგით მონიშნულ ტვიტებს თითოეული რეგიონის მნიშვნელოვანი ქალაქებიდან, რაც რეგიონების შედარების საშუალებას მოგვცემს. ტვიტერზე ლოკაცია ინგლისის რეგიონის მიხედვით არ იძებნება, ამიტომ ვიყენებთ ქალაქებს. შემდეგ ვნახავთ თითოეულ ქალაქში ტვიტების სენტიმენტი რამდენად უკავშირდება რეგიონებში კოვიდის გავრცელების მაჩვენებლებს. 
+
+```{r city covid19 tweets}
+#ტვიტების ჩამოტვირთვა თითოეული ქალაქისთვის
+nottingham <- search_tweets("#covid19", n = 1000, geocode = lookup_coords("nottingham, uk"), include_rts = FALSE)
+norwich <- search_tweets("#covid19", n = 1000, geocode = lookup_coords("norwich, uk"), include_rts = FALSE)
+london <- search_tweets("#covid19", n = 1000, geocode = lookup_coords("london, uk"), include_rts = FALSE)
+newcastle_u_t <- search_tweets("#covid19", n = 1000, geocode = lookup_coords("newcastle upon tymes, uk"), include_rts = FALSE)
+manchester <- search_tweets("#covid19", n = 1000, geocode = lookup_coords("manchester, uk"), include_rts = FALSE)
+southampton <- search_tweets("#covid19", n = 1000, geocode = lookup_coords("southampton, uk"), include_rts = FALSE)
+bristol <- search_tweets("#covid19", n = 1000, geocode = lookup_coords("bristol, uk"), include_rts = FALSE)
+birmingham <- search_tweets("#covid19", n = 1000, geocode = lookup_coords("birmingham, uk"), include_rts = FALSE)
+leeds <- search_tweets("#covid19", n = 1000, geocode = lookup_coords("leeds, uk"), include_rts = FALSE)
+
+#ქალაქის ცვლადს დავამატებთ და შემდეგ ერთ დატაფრეიმად გავაერთიანებთ
+nottingham$city <- "nottingham"
+norwich$city <- "norwhich"
+london$city <- "london"
+newcastle_u_t$city <- "newcastle upon tymes"
+manchester$city <- "manchester"
+southampton$city <- "southampton"
+bristol$city <- "bristol"
+birmingham$city <- "birmingham"
+leeds$city <- "leeds"
+
+#გავაერთიანოთ ერთ დატაფრეიმად
+city_tweets <- rbind(nottingham,norwich,london,newcastle_u_t,manchester,southampton,bristol,birmingham,leeds)
+#ზედმეტი ცვლადების მოშორება
+tidy_city_tweets <- city_tweets %>% 
+  filter(lang == "en") %>% 
+  select(created_at,city,text) %>% 
+  rename(tweets = text)
+
+#ტვიტების გასუფთავება
+tidy_city_tweets <- tidy_city_tweets %>% 
+  mutate(tweets = str_remove_all(tweets, remove_reg)) %>%
+  unnest_tokens(word, tweets, token = "tweets") %>%
+  filter(!word %in% stop_words$word,
+         !word %in% str_remove_all(stop_words$word, "'"),
+         str_detect(word, "[a-z]"))
+
+#afinn ლექსიკონთან დაკავშრება
+tidy_city_tweets <- tidy_city_tweets %>% 
+  inner_join(get_sentiments("afinn"))
+
+#შევამოწმოთ საშუალოდ რამდენია სენტიმენტის ქულა თითოეული ქალაქისთვის
+city_sent <- tidy_city_tweets %>% 
+  group_by(city) %>% 
+  summarise(score = mean(value)) %>% 
+  arrange(desc(score)) 
+
+#დავამატოთ რეგიონის სახელი, კოვიდის სიხშირეებთან შესადარებლად
+city_sent$region <- c("Yorkshire and The Humber","South East","South West","West Midlands","North East",
+                      "North West","East Midlands","East of England","London")
+
+#ვიზუალურად ვნახოთ სად რამდენია სენტიმენტის ქულის საშუალო
+score_plot <- city_sent %>% 
+  ggplot(aes(x = reorder(region, -score), y = score, fill = score < 0)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  coord_flip() +
+  theme_clean()
+
+#ვნახოთ კოვიდის ქეისები რეგიონებში
+covid_plot <- covidUK %>% 
+  filter(type == "Region" & s_date == "2020-06-15") %>% 
+  ggplot(aes(x = reorder(name, case_rate), y = case_rate)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  theme_clean()
+
+#შესადარებლად
+covid_plot | score_plot
+
+tmp <- covidUK %>% 
+  filter(type == "Region" & s_date == "2020-06-15") %>% 
+  rename(region = name)
+
+#გავაერთიანოთ კოვიდისა და სენტიმენტების მონაცემები კორელაციის შესამოწმებლად
+temp_df <- left_join(tmp,city_sent)
+
+#ვიზუალურად შემოწმება
+temp_df %>% 
+  ggplot(aes(x = case_rate, y = score)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_clean()
+
+```
+
+
+
